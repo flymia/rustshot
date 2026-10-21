@@ -1,0 +1,32 @@
+# Multi-instance example: PostgreSQL plus a shared storage volume.
+# Instances are stateless: to run several, drop the fixed port mapping,
+# use `docker compose up -d --scale rustshot=3` and put a reverse proxy in front.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: rustshot
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: rustshot
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "rustshot"]
+      interval: 5s
+
+  rustshot:
+    build: .
+    environment:
+      RUSTSHOT_DATABASE_URL: postgres://rustshot:change-me@postgres/rustshot
+      RUSTSHOT_PUBLIC_URL: http://localhost:8080
+    volumes:
+      - shots:/var/lib/rustshot/data
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  shots:
