@@ -8,7 +8,7 @@ use time::OffsetDateTime;
 
 use crate::db;
 use crate::image;
-use crate::service::{Ctx, NewScreenshot, UploadError};
+use crate::service::{Ctx, NewScreenshot, Stored, UploadError};
 use crate::size::ByteSize;
 
 #[derive(Args)]
@@ -21,9 +21,6 @@ pub struct ImportOpts {
     /// Descend into subdirectories
     #[arg(short, long)]
     recursive: bool,
-    /// Skip files this user already uploaded (same SHA-256)
-    #[arg(long)]
-    skip_duplicates: bool,
     /// Date uploads with the import time instead of the file's modification time
     #[arg(long)]
     use_current_time: bool,
@@ -47,19 +44,13 @@ pub async fn run(ctx: &Ctx, opts: ImportOpts) -> anyhow::Result<()> {
             skipped += 1;
             continue;
         }
-        if opts.skip_duplicates {
+        if opts.dry_run {
             let hash = crate::ids::sha256_hex(&data);
             if let Some(existing) = db::find_upload_by_hash(&ctx.db, &user.id, &hash).await? {
-                println!(
-                    "skip    {} (duplicate of {})",
-                    path.display(),
-                    ctx.share_url(&existing)
-                );
+                print_duplicate(&path, &ctx.share_url(&existing));
                 skipped += 1;
                 continue;
             }
-        }
-        if opts.dry_run {
             println!("would   {}", path.display());
             imported += 1;
             bytes += data.len() as u64;
@@ -77,7 +68,11 @@ pub async fn run(ctx: &Ctx, opts: ImportOpts) -> anyhow::Result<()> {
             created_at,
         };
         match ctx.store_screenshot(&user, new).await {
-            Ok(upload) => {
+            Ok(Stored::Existing(existing)) => {
+                print_duplicate(&path, &ctx.share_url(&existing));
+                skipped += 1;
+            }
+            Ok(Stored::Created(upload)) => {
                 println!("import  {} -> {}", path.display(), ctx.share_url(&upload));
                 imported += 1;
                 bytes += data.len() as u64;
@@ -96,6 +91,10 @@ pub async fn run(ctx: &Ctx, opts: ImportOpts) -> anyhow::Result<()> {
     let verb = if opts.dry_run { "would import" } else { "imported" };
     println!("{verb} {imported} files ({}), skipped {skipped}", ByteSize(bytes));
     Ok(())
+}
+
+fn print_duplicate(path: &Path, url: &str) {
+    println!("skip    {} (duplicate of {url})", path.display());
 }
 
 async fn modified_time(path: &Path) -> Option<OffsetDateTime> {

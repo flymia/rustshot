@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::auth::Auth;
 use super::{ApiError, ApiResult, AppState, UploadView, UserView};
 use crate::db;
-use crate::service::{NewScreenshot, UploadError};
+use crate::service::{NewScreenshot, Stored, UploadError};
 
 pub async fn me(auth: Auth) -> Json<UserView> {
     Json(auth.user.into())
@@ -18,6 +18,8 @@ pub async fn me(auth: Auth) -> Json<UserView> {
 /// Accepts either `multipart/form-data` (the first part carrying a file,
 /// conventionally named `file` - this is what ShareX sends) or the raw image
 /// as request body, optionally naming it via the `X-Filename` header.
+///
+/// Re-uploading content the user already has returns that upload with `200`.
 pub async fn create(
     State(state): State<AppState>,
     auth: Auth,
@@ -51,7 +53,7 @@ pub async fn create(
     }
 
     let original_name = original_name.map(sanitize_name).filter(|n| !n.is_empty());
-    let upload = state
+    let stored = state
         .ctx
         .store_screenshot(
             &auth.user,
@@ -62,7 +64,11 @@ pub async fn create(
             },
         )
         .await?;
-    Ok((StatusCode::CREATED, Json(UploadView::new(&state.ctx, upload))))
+    let status = match stored {
+        Stored::Created(_) => StatusCode::CREATED,
+        Stored::Existing(_) => StatusCode::OK,
+    };
+    Ok((status, Json(UploadView::new(&state.ctx, stored.into_upload()))))
 }
 
 async fn read_multipart(mut multipart: Multipart) -> Result<(Bytes, Option<String>), ApiError> {

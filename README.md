@@ -100,10 +100,10 @@ rustshot user delete <name> --yes                deletes keys, uploads and files
 rustshot key create <name> [--name laptop]
 rustshot key list <name>
 rustshot key revoke <key-id>
-rustshot import <name> <paths>... [-r] [--skip-duplicates] [--use-current-time] [--dry-run]
+rustshot import <name> <paths>... [-r] [--use-current-time] [--dry-run]
 ```
 
-`import` walks the given files and directories (with `-r` recursively, ignoring dot-files), skips anything that isn't a supported image, charges the user's quota and prints the share URL of each file. With `--skip-duplicates` it is safe to re-run over the same folder.
+`import` walks the given files and directories (with `-r` recursively, ignoring dot-files), skips anything that isn't a supported image, charges the user's quota and prints the share URL of each file. Files the user already uploaded are skipped, so it is safe to re-run over the same folder.
 
 ## API
 
@@ -114,7 +114,7 @@ All `/api/v1` endpoints require `Authorization: Bearer <api key>`. Errors are `{
 | `GET` | `/share/{slug}.{ext}` | Public: the screenshot |
 | `GET` | `/healthz` | Liveness check |
 | `GET` | `/api/v1/me` | Current user incl. quota and usage |
-| `POST` | `/api/v1/uploads` | Upload (multipart field `file`, or raw body + optional `X-Filename`) → `201` |
+| `POST` | `/api/v1/uploads` | Upload (multipart field `file`, or raw body + optional `X-Filename`) → `201`, or `200` with the existing upload if the user already uploaded the same file (SHA-256) |
 | `GET` | `/api/v1/uploads?limit=50&offset=0` | Own uploads, newest first |
 | `GET` | `/api/v1/uploads/{id}` | One upload |
 | `DELETE` | `/api/v1/uploads/{id}` | Delete upload and file, refunds quota → `204` |

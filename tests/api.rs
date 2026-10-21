@@ -250,8 +250,8 @@ async fn slugs_are_unique() {
     let t = setup().await;
     let (_, token) = t.user("user", None, None).await;
     let mut urls = std::collections::HashSet::new();
-    for _ in 0..20 {
-        let (status, body) = t.upload(&token, PNG).await;
+    for i in 0..20 {
+        let (status, body) = t.upload(&token, &png_padded(i)).await;
         assert_eq!(status, StatusCode::CREATED);
         assert!(urls.insert(body["url"].as_str().unwrap().to_string()));
     }
@@ -340,13 +340,15 @@ async fn enforces_upload_size_limit() {
 async fn enforces_quotas_and_refunds_on_delete() {
     let t = setup().await;
     let size = PNG.len() as i64;
-    let (_, token) = t.user("user", Some(size * 2), None).await;
+    let (_, token) = t.user("user", Some(size * 2 + 1), None).await;
 
     let (_, first) = t.upload(&token, PNG).await;
-    assert_eq!(t.upload(&token, PNG).await.0, StatusCode::CREATED);
-    let (status, body) = t.upload(&token, PNG).await;
+    assert_eq!(t.upload(&token, &png_padded(1)).await.0, StatusCode::CREATED);
+    let (status, body) = t.upload(&token, &png_padded(2)).await;
     assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE);
     assert_eq!(body["error"], "upload quota exceeded");
+    // A duplicate costs nothing, so it still works with a full quota.
+    assert_eq!(t.upload(&token, PNG).await.0, StatusCode::OK);
 
     // Deleting gives the quota back and removes the file.
     let id = first["id"].as_str().unwrap();
@@ -365,7 +367,10 @@ async fn enforces_quotas_and_refunds_on_delete() {
     // Upload count quota.
     let (_, token) = t.user("user", None, Some(1)).await;
     assert_eq!(t.upload(&token, PNG).await.0, StatusCode::CREATED);
-    assert_eq!(t.upload(&token, PNG).await.0, StatusCode::INSUFFICIENT_STORAGE);
+    assert_eq!(
+        t.upload(&token, &png_padded(1)).await.0,
+        StatusCode::INSUFFICIENT_STORAGE
+    );
 }
 
 #[tokio::test]
@@ -373,9 +378,9 @@ async fn concurrent_uploads_respect_quota() {
     let t = setup().await;
     let (user, token) = t.user("user", None, Some(3)).await;
     let tasks: Vec<_> = (0..12)
-        .map(|_| {
+        .map(|i| {
             let app = t.app.clone();
-            let req = multipart_upload(&token, "shot.png", PNG);
+            let req = multipart_upload(&token, "shot.png", &png_padded(i));
             tokio::spawn(async move { app.oneshot(req).await.unwrap().status() })
         })
         .collect();
@@ -391,7 +396,72 @@ async fn concurrent_uploads_respect_quota() {
     assert_eq!(created, 3);
     let user = db::get_user(&t.ctx.db, &user.id).await.unwrap().unwrap();
     assert_eq!(user.upload_count, 3);
-    assert_eq!(user.used_bytes, 3 * PNG.len() as i64);
+    assert_eq!(user.upload_count, 3);
+    let uploads = db::list_uploads(&t.ctx.db, &user.id, 10, 0).await.unwrap();
+    assert_eq!(user.used_bytes, uploads.iter().map(|u| u.size_bytes).sum::<i64>());
+}
+
+#[tokio::test]
+async fn duplicates_return_existing_upload() {
+    let t = setup().await;
+    let (_, token) = t.user("user", None, None).await;
+
+    let (status, first) = t.upload(&token, PNG).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, second) = t.json(multipart_upload(&token, "other.png", PNG)).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second, first);
+
+    let (_, me) = t.json(get("/api/v1/me", &token)).await;
+    assert_eq!(me["upload_count"], 1);
+    assert_eq!(me["used_bytes"], PNG.len());
+
+    // Deduplication is per user.
+    let (_, other) = t.user("user", None, None).await;
+    let (status, body) = t.upload(&other, PNG).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_ne!(body["url"], first["url"]);
+
+    // After deleting, the same content can be uploaded again.
+    let id = first["id"].as_str().unwrap();
+    t.json(delete(&format!("/api/v1/uploads/{id}"), &token)).await;
+    let (status, again) = t.upload(&token, PNG).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_ne!(again["url"], first["url"]);
+}
+
+#[tokio::test]
+async fn concurrent_duplicates_store_once() {
+    let t = setup().await;
+    let (user, token) = t.user("user", None, None).await;
+    let tasks: Vec<_> = (0..12)
+        .map(|_| {
+            let app = t.app.clone();
+            let req = multipart_upload(&token, "shot.png", PNG);
+            tokio::spawn(async move {
+                let res = app.oneshot(req).await.unwrap();
+                let status = res.status();
+                let body = res.into_body().collect().await.unwrap().to_bytes();
+                (status, serde_json::from_slice::<Value>(&body).unwrap())
+            })
+        })
+        .collect();
+    let mut urls = std::collections::HashSet::new();
+    let mut created = 0;
+    for task in tasks {
+        let (status, body) = task.await.unwrap();
+        assert!(
+            matches!(status, StatusCode::CREATED | StatusCode::OK),
+            "{status} {body}"
+        );
+        created += usize::from(status == StatusCode::CREATED);
+        urls.insert(body["url"].as_str().unwrap().to_string());
+    }
+    assert_eq!(created, 1);
+    assert_eq!(urls.len(), 1);
+    let user = db::get_user(&t.ctx.db, &user.id).await.unwrap().unwrap();
+    assert_eq!(user.upload_count, 1);
+    assert_eq!(user.used_bytes, PNG.len() as i64);
 }
 
 #[tokio::test]
@@ -415,8 +485,8 @@ async fn users_are_isolated() {
 async fn list_pagination() {
     let t = setup().await;
     let (_, token) = t.user("user", None, None).await;
-    for _ in 0..5 {
-        t.upload(&token, PNG).await;
+    for i in 0..5 {
+        t.upload(&token, &png_padded(i)).await;
     }
     let (_, page1) = t.json(get("/api/v1/uploads?limit=3", &token)).await;
     let (_, page2) = t.json(get("/api/v1/uploads?limit=3&offset=3", &token)).await;

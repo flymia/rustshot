@@ -38,6 +38,22 @@ pub struct NewScreenshot<'a> {
     pub created_at: Option<OffsetDateTime>,
 }
 
+/// Result of [`Ctx::store_screenshot`].
+#[derive(Debug)]
+pub enum Stored {
+    Created(Upload),
+    /// The user already uploaded a file with the same SHA-256; nothing was stored.
+    Existing(Upload),
+}
+
+impl Stored {
+    pub fn into_upload(self) -> Upload {
+        match self {
+            Stored::Created(u) | Stored::Existing(u) => u,
+        }
+    }
+}
+
 const SLUG_ATTEMPTS: usize = 5;
 
 impl Ctx {
@@ -46,16 +62,21 @@ impl Ctx {
     }
 
     /// Validates, stores and records a screenshot, charging the user's quota.
+    /// If the user already uploaded identical content (same SHA-256), the
+    /// existing upload is returned instead and no quota is charged.
     ///
     /// Ordering guarantees that a committed row always has its file:
     /// the file is written to a temp location first, then inside one DB
     /// transaction quota is reserved, the row inserted and the file moved
     /// into place - only then is the transaction committed.
-    pub async fn store_screenshot(&self, user: &User, new: NewScreenshot<'_>) -> Result<Upload, UploadError> {
+    pub async fn store_screenshot(&self, user: &User, new: NewScreenshot<'_>) -> Result<Stored, UploadError> {
         let info = image::inspect(new.data)?;
         let size = new.data.len() as i64;
         let created_at = new.created_at.unwrap_or_else(OffsetDateTime::now_utc);
         let sha256 = crate::ids::sha256_hex(new.data);
+        if let Some(existing) = db::find_upload_by_hash(&self.db, &user.id, &sha256).await? {
+            return Ok(Stored::Existing(existing));
+        }
         let temp = self.storage.write_temp(new.data).await?;
 
         let mut temp = Some(temp);
@@ -78,7 +99,15 @@ impl Ctx {
             };
 
             let mut tx = self.db.begin().await?;
-            if !db::reserve_quota(&mut tx, &user.id, size).await? {
+            // Reserving quota writes the user's row, which serializes concurrent uploads
+            // of the same user on both backends. The duplicate check after it therefore
+            // sees every committed upload, so racing identical uploads yield one row.
+            let reserved = db::reserve_quota(&mut tx, &user.id, size).await?;
+            if let Some(existing) = db::find_upload_by_hash(&mut *tx, &user.id, &sha256).await? {
+                // Dropping `tx` rolls back the reservation.
+                return Ok(Stored::Existing(existing));
+            }
+            if !reserved {
                 return Err(UploadError::QuotaExceeded);
             }
             match db::insert_upload(&mut tx, &upload).await {
@@ -97,7 +126,7 @@ impl Ctx {
                 let _ = self.storage.delete(&upload.storage_path).await;
                 return Err(e.into());
             }
-            return Ok(upload);
+            return Ok(Stored::Created(upload));
         }
         Err(UploadError::SlugExhausted)
     }

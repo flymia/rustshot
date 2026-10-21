@@ -399,7 +399,11 @@ pub async fn get_upload(db: &Db, id: &str, user_id: &str) -> sqlx::Result<Option
     .await
 }
 
-pub async fn find_upload_by_hash(db: &Db, user_id: &str, sha256: &str) -> sqlx::Result<Option<Upload>> {
+pub async fn find_upload_by_hash<'e>(
+    db: impl sqlx::Executor<'e, Database = Any>,
+    user_id: &str,
+    sha256: &str,
+) -> sqlx::Result<Option<Upload>> {
     sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {UPLOAD_COLUMNS} FROM uploads WHERE user_id = $1 AND sha256 = $2 \
          ORDER BY created_at LIMIT 1"
