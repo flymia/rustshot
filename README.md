@@ -188,3 +188,18 @@ cargo test                                              # SQLite
 docker run -d --rm -e POSTGRES_PASSWORD=test -p 55432:5432 postgres:17-alpine
 RUSTSHOT_TEST_DATABASE_URL=postgres://postgres:test@127.0.0.1:55432/postgres cargo test   # PostgreSQL
 ```
+
+CI runs `cargo fmt --check`, clippy and the test suite on SQLite and PostgreSQL for every pull request.
+
+## Releases
+
+Bump `version` in `Cargo.toml`, then push a matching tag (`git tag v0.2.0 && git push origin v0.2.0`). The release workflow:
+
+- runs the full CI suite and checks that the tag matches `Cargo.toml`
+- builds static Linux binaries for `x86_64` and `aarch64` (musl) and attaches them with SHA-256 checksums to a GitHub release
+- pushes a multi-arch image to `ghcr.io/flymia/rustshot` (tags `0.2.0`, `0.2`, `latest`)
+
+```sh
+docker run -d -p 8080:8080 -v rustshot:/var/lib/rustshot/data \
+  -e RUSTSHOT_PUBLIC_URL=https://shots.example.com ghcr.io/flymia/rustshot:latest
+```

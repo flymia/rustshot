@@ -35,6 +35,7 @@ Every change touching SQL must pass the test suite on **both** SQLite and Postgr
 | `src/api/` | axum router (`mod.rs`), Bearer auth extractors `Auth`/`Admin` (`auth.rs`), `ApiError` -> JSON `{"error"}` (`error.rs`), handlers per resource |
 | `migrations/` | sqlx migrations, embedded via `sqlx::migrate!` and run on startup |
 | `tests/api.rs` | End-to-end API tests via `tower::ServiceExt::oneshot` |
+| `.github/workflows/` | `ci.yml` (fmt, clippy, tests on SQLite + PostgreSQL), `release.yml` (on `v*` tags: musl binaries, GitHub release, GHCR image via the `prebuilt` Dockerfile target) |
 
 Business logic that both API and CLI need belongs in `service.rs`, not in handlers or CLI code.
 
