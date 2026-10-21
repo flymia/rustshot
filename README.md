@@ -68,6 +68,7 @@ Every option can be set as a flag or an environment variable.
 | `RUSTSHOT_BIND` | `127.0.0.1:8080` | Listen address (`serve` only) |
 | `RUSTSHOT_MAX_UPLOAD_SIZE` | `20MiB` | Max size per screenshot (`serve` only) |
 | `RUSTSHOT_CORS_ORIGINS` | none | Comma-separated origins allowed to use the API from a browser, e.g. a web UI |
+| `RUSTSHOT_METRICS_TOKEN` | none | Bearer token required to scrape `/metrics`. Without it `/metrics` is public |
 | `RUSTSHOT_LOG_LEVEL` | `info` | `error`, `warn`, `info`, `debug` or `trace` (also `--log-level`). `info` logs user actions (uploads, deletions, key and user changes) to stdout. Takes precedence over `RUST_LOG` |
 | `RUST_LOG` | `info,sqlx=warn` | Fine-grained log filter, used when no log level is set |
 
@@ -113,7 +114,8 @@ All `/api/v1` endpoints require `Authorization: Bearer <api key>`. Errors are `{
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/share/{slug}.{ext}` | Public: the screenshot |
-| `GET` | `/healthz` | Liveness check |
+| `GET` | `/healthz` | Public: health check, see [Monitoring](#monitoring) |
+| `GET` | `/metrics` | Prometheus metrics, see [Monitoring](#monitoring) |
 | `GET` | `/api/v1/me` | Current user incl. quota and usage |
 | `POST` | `/api/v1/uploads` | Upload (multipart field `file`, or raw body + optional `X-Filename`) → `201`, or `200` with the existing upload if the user already uploaded the same file (SHA-256) |
 | `GET` | `/api/v1/uploads?limit=50&offset=0` | Own uploads, newest first |
@@ -137,6 +139,40 @@ Admin only (`role = admin`):
 | `DELETE` | `/api/v1/admin/users/{id}/keys/{key_id}` | Revoke a user's key |
 
 Status codes: `401` missing/invalid key, `403` not an admin, `413` file too large, `415` not a supported image, `507` quota exceeded.
+
+## Monitoring
+
+`GET /healthz` checks the database (`SELECT 1`) and the storage directory (writes and removes a temp file), each with a 5 s timeout. It returns `200`, or `503` if a check fails (details go to the log):
+
+```json
+{"status": "ok", "version": "0.1.0", "uptime_seconds": 3600, "checks": {"database": "ok", "storage": "ok"}}
+```
+
+`GET /metrics` serves Prometheus metrics. Set `RUSTSHOT_METRICS_TOKEN` to require `Authorization: Bearer <token>` (API keys are not accepted), or restrict the path in your reverse proxy.
+
+| Metric | Type | Description |
+|---|---|---|
+| `rustshot_build_info{version}` | gauge | Always `1` |
+| `rustshot_start_time_seconds` | gauge | Process start, unix seconds |
+| `rustshot_users{role}` | gauge | Users by role (`admin`, `user`) |
+| `rustshot_uploads` | gauge | Stored screenshots |
+| `rustshot_storage_used_bytes` | gauge | Total size of stored screenshots |
+| `rustshot_recent_uploads{window}` | gauge | Screenshots created in the last `1h`, `24h`, `7d` |
+| `rustshot_last_upload_timestamp_seconds` | gauge | Creation time of the newest screenshot (absent while there are none) |
+| `rustshot_api_keys{state}` | gauge | API keys by state (`active`, `revoked`) |
+| `rustshot_api_keys_recently_used{window}` | gauge | Active keys used in the last `24h` |
+| `rustshot_http_requests_total{method,status}` | counter | HTTP requests handled by this process |
+
+The `rustshot_http_*` counters are per instance. All other metrics come from the database and are the same on every instance sharing it. Imported screenshots count by their file modification time.
+
+```yaml
+scrape_configs:
+  - job_name: rustshot
+    authorization:
+      credentials: <RUSTSHOT_METRICS_TOKEN>
+    static_configs:
+      - targets: ["rustshot:8080"]
+```
 
 ## Security notes
 

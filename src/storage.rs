@@ -89,6 +89,12 @@ impl Storage {
         Ok(temp)
     }
 
+    /// Health probe: creates and removes an empty temp file, which catches a
+    /// missing, read-only or full volume.
+    pub async fn check_writable(&self) -> io::Result<()> {
+        self.write_temp(&[]).await.map(drop)
+    }
+
     /// Moves a temp file to `relative`. Fails if the target already exists.
     pub async fn persist(&self, mut temp: TempFile, relative: &str) -> io::Result<()> {
         let target = self.absolute(relative)?;

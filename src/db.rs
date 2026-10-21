@@ -443,3 +443,80 @@ pub async fn delete_upload(db: &Db, id: &str, user_id: &str) -> sqlx::Result<Opt
     tx.commit().await?;
     Ok(upload)
 }
+
+// ---------------------------------------------------------------------------
+// Health and statistics
+// ---------------------------------------------------------------------------
+
+pub async fn ping(db: &Db) -> sqlx::Result<()> {
+    sqlx::query("SELECT 1").execute(db).await?;
+    Ok(())
+}
+
+/// Server wide numbers for `/metrics`.
+#[derive(Debug, Default)]
+pub struct Stats {
+    pub admins: i64,
+    pub users: i64,
+    pub uploads: i64,
+    pub used_bytes: i64,
+    /// Uploads created within each of the requested windows (seconds), in request order.
+    pub recent_uploads: Vec<i64>,
+    pub last_upload_at: Option<i64>,
+    pub active_keys: i64,
+    pub revoked_keys: i64,
+    /// Active keys used within the requested window.
+    pub recently_used_keys: i64,
+}
+
+#[derive(FromRow)]
+struct UserUsage {
+    role: String,
+    used_bytes: i64,
+    upload_count: i64,
+}
+
+/// Collects [`Stats`]. Totals come from the per-user counters instead of
+/// scanning `uploads` (and `SUM` is not portable), time windows use
+/// `idx_uploads_created`.
+pub async fn stats(db: &Db, upload_windows: &[i64], key_window: i64) -> sqlx::Result<Stats> {
+    let now = now();
+    let mut stats = Stats::default();
+
+    let users: Vec<UserUsage> = sqlx::query_as("SELECT role, used_bytes, upload_count FROM users")
+        .fetch_all(db)
+        .await?;
+    for u in users {
+        if u.role == ROLE_ADMIN {
+            stats.admins += 1;
+        } else {
+            stats.users += 1;
+        }
+        stats.uploads += u.upload_count;
+        stats.used_bytes += u.used_bytes;
+    }
+
+    for window in upload_windows {
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM uploads WHERE created_at >= $1")
+            .bind(now - window)
+            .fetch_one(db)
+            .await?;
+        stats.recent_uploads.push(count);
+    }
+    (stats.last_upload_at,) = sqlx::query_as("SELECT MAX(created_at) FROM uploads")
+        .fetch_one(db)
+        .await?;
+
+    (stats.active_keys,) = sqlx::query_as("SELECT COUNT(*) FROM api_keys WHERE revoked_at IS NULL")
+        .fetch_one(db)
+        .await?;
+    (stats.revoked_keys,) = sqlx::query_as("SELECT COUNT(*) FROM api_keys WHERE revoked_at IS NOT NULL")
+        .fetch_one(db)
+        .await?;
+    (stats.recently_used_keys,) =
+        sqlx::query_as("SELECT COUNT(*) FROM api_keys WHERE revoked_at IS NULL AND last_used_at >= $1")
+            .bind(now - key_window)
+            .fetch_one(db)
+            .await?;
+    Ok(stats)
+}

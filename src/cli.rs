@@ -127,6 +127,10 @@ struct ServeOpts {
     /// Comma separated origins allowed to use the API from a browser
     #[arg(long, env = "RUSTSHOT_CORS_ORIGINS", value_delimiter = ',')]
     cors_origins: Vec<String>,
+
+    /// Bearer token Prometheus must send to scrape `/metrics`. Without it the endpoint is public
+    #[arg(long, env = "RUSTSHOT_METRICS_TOKEN", hide_env_values = true)]
+    metrics_token: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -222,6 +226,7 @@ async fn serve(ctx: Ctx, opts: ServeOpts) -> anyhow::Result<()> {
             .map(|o| o.trim().to_string())
             .filter(|o| !o.is_empty())
             .collect(),
+        metrics_token: opts.metrics_token.filter(|t| !t.is_empty()),
     };
     tracing::info!(
         bind = %opts.bind,

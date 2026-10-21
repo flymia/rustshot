@@ -1,17 +1,22 @@
 //! HTTP API. All `/api/v1` routes require `Authorization: Bearer <api key>`,
-//! `/share/{slug}.{ext}` is public.
+//! `/share/{slug}.{ext}` and `/healthz` are public, `/metrics` optionally
+//! requires the metrics token.
 
 mod admin;
 mod auth;
 mod error;
+mod health;
 mod keys;
+mod metrics;
 mod share;
 mod uploads;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, Method, header};
+use axum::middleware;
 use axum::routing::{delete, get};
 use axum::{Json, Router};
 use serde::Serialize;
@@ -29,6 +34,8 @@ pub struct ApiConfig {
     pub max_upload_bytes: usize,
     /// Origins allowed to call the API from a browser (e.g. a web UI).
     pub cors_origins: Vec<String>,
+    /// Bearer token required for `/metrics`; `None` leaves it public.
+    pub metrics_token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -37,6 +44,10 @@ pub struct AppState(Arc<Inner>);
 pub struct Inner {
     pub ctx: Ctx,
     pub config: ApiConfig,
+    started: Instant,
+    /// Unix seconds, for `rustshot_start_time_seconds`.
+    started_at: i64,
+    http: metrics::HttpMetrics,
 }
 
 impl std::ops::Deref for AppState {
@@ -52,7 +63,13 @@ const MULTIPART_OVERHEAD: usize = 64 * 1024;
 pub fn router(ctx: Ctx, config: ApiConfig) -> Router {
     let body_limit = config.max_upload_bytes + MULTIPART_OVERHEAD;
     let cors = cors_layer(&config.cors_origins);
-    let state = AppState(Arc::new(Inner { ctx, config }));
+    let state = AppState(Arc::new(Inner {
+        ctx,
+        config,
+        started: Instant::now(),
+        started_at: crate::db::now(),
+        http: metrics::HttpMetrics::default(),
+    }));
 
     let api = Router::new()
         .route("/me", get(uploads::me))
@@ -82,15 +99,13 @@ pub fn router(ctx: Ctx, config: ApiConfig) -> Router {
         .layer(cors);
 
     Router::new()
-        .route("/healthz", get(healthz))
+        .route("/healthz", get(health::healthz))
+        .route("/metrics", get(metrics::metrics))
         .route("/share/{file}", get(share::serve))
         .nest("/api/v1", api)
+        .layer(middleware::from_fn_with_state(state.clone(), metrics::track))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
-}
-
-async fn healthz() -> &'static str {
-    "ok"
 }
 
 fn cors_layer(origins: &[String]) -> CorsLayer {

@@ -35,6 +35,10 @@ async fn setup() -> TestApp {
 }
 
 async fn setup_with_limit(max_upload_bytes: usize) -> TestApp {
+    setup_with(max_upload_bytes, None).await
+}
+
+async fn setup_with(max_upload_bytes: usize, metrics_token: Option<&str>) -> TestApp {
     let dir = tempfile::tempdir().unwrap();
     let url = std::env::var("RUSTSHOT_TEST_DATABASE_URL")
         .unwrap_or_else(|_| format!("sqlite://{}?mode=rwc", dir.path().join("test.db").display()));
@@ -48,6 +52,7 @@ async fn setup_with_limit(max_upload_bytes: usize) -> TestApp {
     let config = ApiConfig {
         max_upload_bytes,
         cors_origins: vec![],
+        metrics_token: metrics_token.map(Into::into),
     };
     TestApp {
         app: api::router(ctx.clone(), config),
@@ -608,4 +613,135 @@ async fn sharex_config() {
     assert_eq!(config["RequestURL"], format!("{PUBLIC_URL}/api/v1/uploads"));
     assert_eq!(config["Headers"]["Authorization"], format!("Bearer {token}"));
     assert_eq!(config["URL"], "{json:url}");
+}
+
+// ---------------------------------------------------------------------------
+// Health and metrics
+// ---------------------------------------------------------------------------
+
+fn anonymous(uri: &str) -> Request<Body> {
+    Request::get(uri).body(Body::empty()).unwrap()
+}
+
+/// Value of the sample `series` (name plus labels, exactly as rendered).
+fn metric(text: &str, series: &str) -> f64 {
+    text.lines()
+        .find_map(|l| l.strip_prefix(series)?.strip_prefix(' '))
+        .unwrap_or_else(|| panic!("missing {series} in:\n{text}"))
+        .parse()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn healthz_reports_checks() {
+    let t = setup().await;
+    let (status, body) = t.json(anonymous("/healthz")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["checks"], json!({"database": "ok", "storage": "ok"}));
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+
+    // Without the temp dir no upload can be written.
+    std::fs::remove_dir_all(t.ctx.storage.root().join(".tmp")).unwrap();
+    let (status, body) = t.json(anonymous("/healthz")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["checks"], json!({"database": "ok", "storage": "error"}));
+}
+
+#[tokio::test]
+async fn metrics_report_stats() {
+    let t = setup().await;
+    let (_, token) = t.user("user", None, None).await;
+    let (_, admin_token) = t.user("admin", None, None).await;
+    for i in 0..3 {
+        assert_eq!(t.upload(&token, &png_padded(i)).await.0, StatusCode::CREATED);
+    }
+    // A duplicate stores nothing.
+    assert_eq!(t.upload(&token, &png_padded(0)).await.0, StatusCode::OK);
+    let (_, body) = t.json(get("/api/v1/keys", &admin_token)).await;
+    let key_id = body[0]["id"].as_str().unwrap();
+    assert_eq!(
+        t.send(delete(&format!("/api/v1/keys/{key_id}"), &admin_token))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+
+    let (status, headers, body) = t.send(anonymous("/metrics")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        headers[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain; version=0.0.4")
+    );
+    let text = String::from_utf8(body).unwrap();
+
+    // Database backed values are lower bounds: the PostgreSQL suite shares one database.
+    assert!(metric(&text, r#"rustshot_users{role="user"}"#) >= 1.0);
+    assert!(metric(&text, r#"rustshot_users{role="admin"}"#) >= 1.0);
+    assert!(metric(&text, "rustshot_uploads") >= 3.0);
+    assert!(metric(&text, "rustshot_storage_used_bytes") >= (3 * PNG.len() + 3) as f64);
+    for window in ["1h", "24h", "7d"] {
+        assert!(metric(&text, &format!(r#"rustshot_recent_uploads{{window="{window}"}}"#)) >= 3.0);
+    }
+    assert!(metric(&text, "rustshot_last_upload_timestamp_seconds") > 0.0);
+    assert!(metric(&text, r#"rustshot_api_keys{state="active"}"#) >= 1.0);
+    assert!(metric(&text, r#"rustshot_api_keys{state="revoked"}"#) >= 1.0);
+    assert!(metric(&text, r#"rustshot_api_keys_recently_used{window="24h"}"#) >= 1.0);
+    // Process counters are exact.
+    assert_eq!(
+        metric(
+            &text,
+            r#"rustshot_http_requests_total{method="POST",status="201"}"#
+        ),
+        3.0
+    );
+    assert_eq!(
+        metric(
+            &text,
+            r#"rustshot_http_requests_total{method="POST",status="200"}"#
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric(
+            &text,
+            r#"rustshot_http_requests_total{method="DELETE",status="204"}"#
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric(
+            &text,
+            &format!(
+                r#"rustshot_build_info{{version="{}"}}"#,
+                env!("CARGO_PKG_VERSION")
+            )
+        ),
+        1.0
+    );
+}
+
+#[tokio::test]
+async fn metrics_token() {
+    let t = setup_with(1 << 20, Some("scrape-secret")).await;
+    let (_, user_token) = t.user("admin", None, None).await;
+
+    let (status, headers, _) = t.send(anonymous("/metrics")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(headers[header::WWW_AUTHENTICATE], "Bearer");
+    // API keys do not grant access, not even admin ones.
+    assert_eq!(
+        t.send(get("/metrics", &user_token)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        t.send(get("/metrics", "scrape-secre")).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(t.send(get("/metrics", "scrape-secret")).await.0, StatusCode::OK);
+    // Health stays public.
+    assert_eq!(t.send(anonymous("/healthz")).await.0, StatusCode::OK);
 }
