@@ -64,9 +64,27 @@ pub async fn create(
             },
         )
         .await?;
-    let status = match stored {
-        Stored::Created(_) => StatusCode::CREATED,
-        Stored::Existing(_) => StatusCode::OK,
+    let status = match &stored {
+        Stored::Created(u) => {
+            tracing::info!(
+                user = %auth.user.username,
+                upload_id = %u.id,
+                file = %u.file_name(),
+                size = u.size_bytes,
+                original_name = u.original_name.as_deref().unwrap_or(""),
+                "upload created"
+            );
+            StatusCode::CREATED
+        }
+        Stored::Existing(u) => {
+            tracing::info!(
+                user = %auth.user.username,
+                upload_id = %u.id,
+                file = %u.file_name(),
+                "duplicate upload, returning existing"
+            );
+            StatusCode::OK
+        }
     };
     Ok((status, Json(UploadView::new(&state.ctx, stored.into_upload()))))
 }
@@ -151,6 +169,7 @@ pub async fn list(
     let limit = q.limit.clamp(1, 500);
     let offset = q.offset.max(0);
     let uploads = db::list_uploads(&state.ctx.db, &auth.user.id, limit, offset).await?;
+    tracing::debug!(user = %auth.user.username, limit, offset, "listed uploads");
     Ok(Json(UploadList {
         items: uploads
             .into_iter()
@@ -174,11 +193,18 @@ pub async fn delete(
     auth: Auth,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    state
+    let upload = state
         .ctx
         .delete_upload(&id, &auth.user.id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    tracing::info!(
+        user = %auth.user.username,
+        upload_id = %upload.id,
+        file = %upload.file_name(),
+        size = upload.size_bytes,
+        "upload deleted"
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 

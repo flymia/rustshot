@@ -68,7 +68,8 @@ Every option can be set as a flag or an environment variable.
 | `RUSTSHOT_BIND` | `127.0.0.1:8080` | Listen address (`serve` only) |
 | `RUSTSHOT_MAX_UPLOAD_SIZE` | `20MiB` | Max size per screenshot (`serve` only) |
 | `RUSTSHOT_CORS_ORIGINS` | none | Comma-separated origins allowed to use the API from a browser, e.g. a web UI |
-| `RUST_LOG` | `info,sqlx=warn` | Log filter |
+| `RUSTSHOT_LOG_LEVEL` | `info` | `error`, `warn`, `info`, `debug` or `trace` (also `--log-level`). `info` logs user actions (uploads, deletions, key and user changes) to stdout. Takes precedence over `RUST_LOG` |
+| `RUST_LOG` | `info,sqlx=warn` | Fine-grained log filter, used when no log level is set |
 
 Run rustshot behind a TLS-terminating reverse proxy (Caddy, nginx, Traefik). API keys are sent in clear text otherwise.
 

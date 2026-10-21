@@ -4,7 +4,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use tracing_subscriber::EnvFilter;
 
 use crate::api::{self, ApiConfig};
 use crate::db::{self, NewUser, ROLE_ADMIN, ROLE_USER, User, UserUpdate};
@@ -57,6 +58,44 @@ struct GlobalOpts {
     /// Do not apply pending database migrations on startup
     #[arg(long, env = "RUSTSHOT_SKIP_MIGRATIONS", global = true)]
     skip_migrations: bool,
+
+    /// Log verbosity; `info` logs user actions such as uploads. Takes precedence over `RUST_LOG`
+    /// [default: info]
+    #[arg(long, env = "RUSTSHOT_LOG_LEVEL", value_enum, global = true)]
+    log_level: Option<LogLevel>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl LogLevel {
+    fn as_str(self) -> &'static str {
+        match self {
+            LogLevel::Error => "error",
+            LogLevel::Warn => "warn",
+            LogLevel::Info => "info",
+            LogLevel::Debug => "debug",
+            LogLevel::Trace => "trace",
+        }
+    }
+}
+
+const DEFAULT_LOG_FILTER: &str = "info,sqlx=warn";
+
+impl Cli {
+    /// `--log-level` wins, then `RUST_LOG` (for fine-grained per-module filters), then `info`.
+    pub fn log_filter(&self) -> EnvFilter {
+        match self.global.log_level {
+            Some(level) => EnvFilter::new(format!("{},sqlx=warn", level.as_str())),
+            None => EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER)),
+        }
+    }
 }
 
 #[derive(Subcommand)]

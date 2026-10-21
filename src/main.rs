@@ -1,13 +1,15 @@
+use std::io::IsTerminal;
+
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
+use rustshot::cli::Cli;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn")),
-        )
-        .with_writer(std::io::stderr)
+        .with_env_filter(cli.log_filter())
+        .with_writer(std::io::stdout)
+        .with_ansi(std::io::stdout().is_terminal())
         .init();
-    rustshot::cli::run(rustshot::cli::Cli::parse()).await
+    rustshot::cli::run(cli).await
 }

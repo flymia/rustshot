@@ -50,7 +50,7 @@ pub async fn list_users(State(state): State<AppState>, _: Admin) -> ApiResult<Ve
 
 pub async fn create_user(
     State(state): State<AppState>,
-    _: Admin,
+    Admin(admin): Admin,
     Json(body): Json<CreateUser>,
 ) -> Result<(StatusCode, Json<UserView>), ApiError> {
     let new = NewUser {
@@ -60,7 +60,16 @@ pub async fn create_user(
         quota_uploads: validate_quota(body.quota_uploads).map_err(bad)?,
     };
     match db::create_user(&state.ctx.db, new).await {
-        Ok(user) => Ok((StatusCode::CREATED, Json(user.into()))),
+        Ok(user) => {
+            tracing::info!(
+                admin = %admin.user.username,
+                user = %user.username,
+                user_id = %user.id,
+                role = %user.role,
+                "user created"
+            );
+            Ok((StatusCode::CREATED, Json(user.into())))
+        }
         Err(e) if db::is_unique_violation(&e) => Err(ApiError::Conflict("username already taken".into())),
         Err(e) => Err(e.into()),
     }
@@ -76,7 +85,7 @@ pub async fn get_user(
 
 pub async fn update_user(
     State(state): State<AppState>,
-    _: Admin,
+    Admin(admin): Admin,
     Path(id): Path<String>,
     Json(body): Json<PatchUser>,
 ) -> ApiResult<UserView> {
@@ -94,6 +103,14 @@ pub async fn update_user(
     let user = db::update_user(&state.ctx.db, &id, update)
         .await?
         .ok_or(ApiError::NotFound)?;
+    tracing::info!(
+        admin = %admin.user.username,
+        user = %user.username,
+        role = %user.role,
+        quota_bytes = ?user.quota_bytes,
+        quota_uploads = ?user.quota_uploads,
+        "user updated"
+    );
     Ok(Json(user.into()))
 }
 
@@ -105,9 +122,17 @@ pub async fn delete_user(
     if auth.user.id == id {
         return Err(ApiError::BadRequest("refusing to delete your own account".into()));
     }
+    let user = load_user(&state, &id).await?;
     if !state.ctx.delete_user(&id).await? {
         return Err(ApiError::NotFound);
     }
+    tracing::info!(
+        admin = %auth.user.username,
+        user = %user.username,
+        user_id = %user.id,
+        uploads = user.upload_count,
+        "user deleted"
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -123,13 +148,20 @@ pub async fn list_keys(
 
 pub async fn create_key(
     State(state): State<AppState>,
-    _: Admin,
+    Admin(admin): Admin,
     Path(id): Path<String>,
     Json(body): Json<CreateKey>,
 ) -> Result<(StatusCode, Json<NewKeyView>), ApiError> {
     let user = load_user(&state, &id).await?;
     let name = validate_key_name(&body.name)?;
     let (key, token) = db::create_api_key(&state.ctx.db, &user.id, name).await?;
+    tracing::info!(
+        admin = %admin.user.username,
+        user = %user.username,
+        key_id = %key.id,
+        key_name = %key.name,
+        "API key created"
+    );
     Ok((
         StatusCode::CREATED,
         Json(NewKeyView {
@@ -141,11 +173,12 @@ pub async fn create_key(
 
 pub async fn revoke_key(
     State(state): State<AppState>,
-    _: Admin,
+    Admin(admin): Admin,
     Path((id, key_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     if !db::revoke_api_key(&state.ctx.db, &key_id, Some(&id)).await? {
         return Err(ApiError::NotFound);
     }
+    tracing::info!(admin = %admin.user.username, user_id = %id, key_id = %key_id, "API key revoked");
     Ok(StatusCode::NO_CONTENT)
 }

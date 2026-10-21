@@ -40,6 +40,7 @@ pub async fn serve(
         tracing::error!(path = %upload.storage_path, "file of existing upload is missing");
         return Ok(ApiError::NotFound.into_response());
     }
+    tracing::debug!(file = %file, status = %res.status(), "share served");
     let headers = res.headers_mut();
     if let Ok(ct) = HeaderValue::from_str(&upload.content_type) {
         headers.insert(header::CONTENT_TYPE, ct);
